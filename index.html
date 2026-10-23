@@ -66,6 +66,11 @@ img{-webkit-user-drag:none;max-width:100%}
 .tile.fire{animation:fire .5s ease}
 @keyframes fire{0%{box-shadow:0 0 0 0 var(--sun)}40%{box-shadow:0 0 0 12px var(--sun);transform:scale(1.03)}100%{box-shadow:0 0 0 0 transparent}}
 .tile.empty{visibility:hidden}
+.tile.folder{box-shadow:7px 7px 0 0 var(--ink);margin:0 7px 7px 0}
+.tile.folder .lbl::after{content:" ›"}
+.tile.folder.press{box-shadow:7px 7px 0 0 var(--ink),0 0 0 6px var(--sun)}
+.tile.backtile{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.tile.backtile .pic svg{height:60%;max-height:120px;width:auto}
 .pager{display:flex;justify-content:center;align-items:center;gap:20px;font-size:20px;font-weight:700}
 .pager button{border:3px solid var(--ink);background:var(--tile);border-radius:14px;width:120px;height:56px;font-size:26px}
 .pager button:disabled{opacity:.3}
@@ -243,14 +248,31 @@ const DEFAULT_PICTOS = [
   {id:'dormir',   label:'Dormir',     phrase:'Tengo sueño, quiero dormir',  src:{type:'embedded',key:'dormir'}},
   {id:'terapias', label:'Terapias',   phrase:'Quiero ir a terapias',        src:{type:'embedded',key:'terapias'}},
   {id:'casa',     label:'Casa',       phrase:'Quiero ir a casa',            src:{type:'arasaac',id:2317}},
-  {id:'mama',     label:'Mamá',       phrase:'Mamá',                        src:{type:'arasaac',id:2458}},
-  {id:'papa',     label:'Papá',       phrase:'Papá',                        src:{type:'arasaac',id:31146}},
+  {id:'familia',  label:'Familia',    phrase:'Familia',                     src:{type:'arasaac',id:2392}, folder:true},
+  /* dentro de la carpeta Familia (cambiar por fotos reales en Ajustes → Editar) */
+  {id:'papa',     label:'Papá',       phrase:'Papá',      in:'familia',     src:{type:'arasaac',id:31146}},
+  {id:'roberto',  label:'Roberto',    phrase:'Roberto',   in:'familia',     src:{type:'arasaac',id:4665}},
+  {id:'gabriela', label:'Gabriela',   phrase:'Gabriela',  in:'familia',     src:{type:'arasaac',id:4703}},
+  {id:'jesica',   label:'Jesica',     phrase:'Jesica',    in:'familia',     src:{type:'arasaac',id:24621}},
+  {id:'gonzalo',  label:'Gonzalo',    phrase:'Gonzalo',   in:'familia',     src:{type:'arasaac',id:10360}},
+  {id:'abuela',   label:'Abuela',     phrase:'Abuela',    in:'familia',     src:{type:'arasaac',id:2243}},
 ];
+const DATA_VERSION = 2;
 const DEFAULT_SETTINGS = {name:'Antonella', cols:4, rows:3, showLabels:true, voiceURI:'', rate:0.9,
   lockMs:800, showGames:true, options:2, rounds:5, hair:'blonde'};
 
-function freshPictos(){
-  return DEFAULT_PICTOS.map(p => ({...p, src:{...p.src}, img:'', audio:'', hidden:false, games:true}));
+function blankPicto(p){ return {...p, src:{...p.src}, img:'', audio:'', hidden:false, games:!p.folder}; }
+function freshPictos(){ return DEFAULT_PICTOS.map(blankPicto); }
+/* actualiza lo guardado en la tablet sin perder fotos ni grabaciones */
+function migrate(list, from){
+  if (from < 2){
+    list = list.filter(p => p.id !== 'mama');
+    if (!list.some(p => p.id === 'familia')) list.push(blankPicto(DEFAULT_PICTOS.find(p => p.id === 'familia')));
+    const papa = list.find(p => p.id === 'papa'); if (papa) papa.in = 'familia';
+    for (const id of ['roberto','gabriela','jesica','gonzalo','abuela'])
+      if (!list.some(p => p.id === id)) list.push(blankPicto(DEFAULT_PICTOS.find(p => p.id === id)));
+  }
+  return list;
 }
 
 /* ---------- almacenamiento (IndexedDB con respaldo en memoria) ---------- */
@@ -279,8 +301,12 @@ const store = (() => {
 let pictos = [], settings = {...DEFAULT_SETTINGS};
 async function load(){
   const p = await store.get('pictos'); const s = await store.get('settings');
-  pictos = Array.isArray(p) && p.length ? p : freshPictos();
   settings = {...DEFAULT_SETTINGS, ...(s||{})};
+  if (Array.isArray(p) && p.length){
+    pictos = p;
+    const v = settings.dataVersion || 1;
+    if (v < DATA_VERSION){ pictos = migrate(pictos, v); settings.dataVersion = DATA_VERSION; await savePictos(); await saveSettings(); }
+  } else { pictos = freshPictos(); settings.dataVersion = DATA_VERSION; }
   try{ navigator.storage && navigator.storage.persist && navigator.storage.persist(); }catch(e){}
 }
 const savePictos = () => store.set('pictos', pictos);
@@ -404,7 +430,17 @@ function gridDims(){
   if (innerHeight > innerWidth && c > r) [c, r] = [r, c];
   return {c, r};
 }
-function visiblePictos(){ return pictos.filter(p => !p.hidden); }
+let openFolder = null, folderTimer = 0;
+const BACK = {id:'__back', label:'Volver', back:true};
+const folders = () => pictos.filter(p => p.folder);
+function visiblePictos(){
+  if (openFolder){
+    const f = pictos.find(p => p.id === openFolder);
+    if (!f){ openFolder = null; return visiblePictos(); }
+    return [BACK, ...pictos.filter(p => !p.hidden && p.in === openFolder)];
+  }
+  return pictos.filter(p => !p.hidden && (!p.in || !pictos.some(f => f.folder && f.id === p.in)));
+}
 function renderBoard(){
   const {c, r} = gridDims(); const per = c*r; const list = visiblePictos();
   const pages = Math.max(1, Math.ceil(list.length / per)); page = Math.min(page, pages-1);
@@ -415,6 +451,12 @@ function renderBoard(){
     const p = slice[i]; const t = document.createElement('div'); t.className = 'tile';
     if (!p){ t.classList.add('empty'); board.appendChild(t); continue; }
     t.dataset.id = p.id;
+    if (p.back){
+      t.classList.add('backtile');
+      t.innerHTML = '<div class="pic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 6l-6 6 6 6"/><path d="M4 12h16"/></svg></div><div class="lbl">Volver</div>';
+      board.appendChild(t); continue;
+    }
+    if (p.folder) t.classList.add('folder');
     const pic = document.createElement('div'); pic.className = 'pic';
     const im = makeImg(p); if (im) pic.appendChild(im); else { t.classList.add('noimg'); pic.textContent = p.label; }
     t.appendChild(pic);
@@ -426,10 +468,15 @@ function renderBoard(){
   $('who').textContent = settings.name || '';
 }
 let lastSaid = null;
+function goFolder(id){ clearTimeout(folderTimer); openFolder = id; page = 0; renderBoard(); }
 function fireTile(tile){
+  if (tile.dataset.id === '__back'){ goFolder(null); return; }
   const p = pictos.find(x => x.id === tile.dataset.id); if (!p) return;
   tile.classList.remove('fire'); void tile.offsetWidth; tile.classList.add('fire');
   say(p.phrase || p.label, p.audio); lastSaid = p; showMsg(p);
+  if (p.folder){ setTimeout(() => goFolder(p.id), 350); return; }
+  /* después de elegir a alguien de la carpeta, vuelve solo al tablero principal */
+  if (openFolder){ clearTimeout(folderTimer); folderTimer = setTimeout(() => goFolder(null), 1800); }
 }
 function showMsg(p){
   const m = $('msg'); m.innerHTML = ''; m.classList.add('has');
@@ -457,7 +504,7 @@ $('tabPlay').addEventListener('click', () => showTab('play'));
 /* ---------- juegos ---------- */
 const ICON_BACK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>';
 const ICON_SPK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/></svg>';
-const gamePool = () => pictos.filter(p => p.games && imgFor(p));
+const gamePool = () => pictos.filter(p => p.games && !p.folder && !p.hidden && imgFor(p));
 const shuffle = a => { a = a.slice(); for (let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; };
 
 function renderGameMenu(){
@@ -663,7 +710,7 @@ function openSettings(){
     pictos.forEach((p,i) => {
       list.appendChild(h('div',{class:'prow'+(p.hidden?' off':'')},
         thumb(p),
-        h('div',{class:'t'}, h('b',{},p.label), h('small',{}, (p.audio?'🎙 ':'') + '“' + (p.phrase||p.label) + '”')),
+        h('div',{class:'t'}, h('b',{},p.label + (p.folder ? ' (carpeta)' : '')), h('small',{}, (p.in ? 'En ' + ((pictos.find(f=>f.id===p.in)||{}).label||'carpeta') + ' · ' : '') + (p.audio?'🎙 ':'') + '“' + (p.phrase||p.label) + '”')),
         h('button',{class:'sbtn', 'aria-label':'Subir', disabled: i===0, on:{click:()=>{ [pictos[i-1],pictos[i]]=[pictos[i],pictos[i-1]]; savePictos(); drawList(); }}}, '▲'),
         h('button',{class:'sbtn', 'aria-label':'Bajar', disabled: i===pictos.length-1, on:{click:()=>{ [pictos[i+1],pictos[i]]=[pictos[i],pictos[i+1]]; savePictos(); drawList(); }}}, '▼'),
         h('button',{class:'sbtn', on:{click:()=>{ p.hidden=!p.hidden; savePictos(); drawList(); }}}, p.hidden?'Mostrar':'Ocultar'),
@@ -726,7 +773,7 @@ function openSettings(){
   let resetArmed = false;
   const resetBtn = h('button',{class:'sbtn danger', on:{click:async ()=>{
     if (!resetArmed){ resetArmed = true; resetBtn.textContent = 'Tocá otra vez para borrar todo'; setTimeout(()=>{ resetArmed=false; resetBtn.textContent='Volver a empezar'; }, 4000); return; }
-    pictos = freshPictos(); settings = {...DEFAULT_SETTINGS}; await savePictos(); await saveSettings(); cacheRemote(); toast('Listo, volvió a como estaba al principio'); openSettings();
+    pictos = freshPictos(); settings = {...DEFAULT_SETTINGS, dataVersion:DATA_VERSION}; openFolder = null; await savePictos(); await saveSettings(); cacheRemote(); toast('Listo, volvió a como estaba al principio'); openSettings();
   }}}, 'Volver a empezar');
   inner.appendChild(h('section',{class:'sec'},
     h('h2',{},'Copia de seguridad'),
@@ -854,7 +901,9 @@ function openEditor(p, onDone, isNew){
       h('div',{class:'row2'}, recBtn, playBtn, delBtn, recState)
     ),
     h('section',{class:'sec'},
-      h('label',{class:'row2', for:'edGames', style:'font-weight:700'}, games, 'Usar en los juegos'),
+      draft.folder ? null : h('div',{class:'field'}, h('label',{},'Dónde va'),
+        seg([['', 'Tablero principal'], ...folders().filter(f => f.id !== draft.id).map(f => [f.id, 'Carpeta ' + f.label])], draft.in || '', v => { draft.in = v || undefined; })),
+      draft.folder ? h('p',{class:'note'},'Esta tarjeta es una carpeta: al tocarla se abren los pictogramas que tengan “Dónde va” en esta carpeta.') : h('label',{class:'row2', for:'edGames', style:'font-weight:700'}, games, 'Usar en los juegos'),
       isNew ? null : h('div',{class:'row2'}, delPicto)
     )
   );
